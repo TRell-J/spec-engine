@@ -1,0 +1,12 @@
+streamlit>=1.35.0
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+pytest>=8.0.0
+
+# Only needed for the Anthropic provider. Every OpenAI-compatible endpoint —
+# OpenAI, Google, OpenRouter, Groq, Together, DeepSeek, Mistral, Ollama, LM
+# Studio, vLLM, anything self-hosted — is reached with the standard library,
+# so an open-weight model on your own machine needs no vendor SDK at all.
+# 1.x is required: the Anthropic pass pins its output to a JSON Schema via
+# `output_config`, which the 0.x SDK does not support.
+anthropic>=1.0.0

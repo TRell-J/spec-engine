@@ -1,0 +1,45 @@
+# Visual language adapted from obvious.ai for a portfolio prototype.
+# Palette and proportions only — no logo, wordmark, or claim of affiliation.
+# Measured from the live site: canvas #f7f6f2, ink #1c1d1b, accent #3d5638,
+# hairline #e3e2de, 16px cards, pill controls.
+#
+# Their typeface (Booton) is licensed and not redistributable, so Figtree —
+# a geometric sans with a similar warmth — stands in for it.
+
+[theme]
+base = "light"
+
+backgroundColor = "#f7f6f2"           # canvas
+secondaryBackgroundColor = "#ffffff"  # cards, inputs
+textColor = "#1c1d1b"                 # ink
+borderColor = "#e3e2de"               # hairline
+primaryColor = "#3d5638"              # accent
+linkColor = "#3d5638"
+linkUnderline = false
+
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "12px"
+buttonRadius = "full"
+baseFontSize = 16
+
+font = "Figtree:https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap"
+headingFont = "Figtree:https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap"
+
+codeBackgroundColor = "#f2f1ed"
+codeTextColor = "#44423d"
+
+# Semantic families, so st.error / st.warning / st.success match the system.
+greenColor = "#3d5638"
+greenTextColor = "#3d5638"
+orangeColor = "#8a6a1f"
+orangeTextColor = "#8a6a1f"
+redColor = "#9b3a2b"
+redTextColor = "#9b3a2b"
+grayTextColor = "#605d58"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
