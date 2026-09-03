@@ -151,10 +151,16 @@ def test_no_estimate_is_shown_for_an_uncompilable_document(monkeypatch):
 
 
 def test_a_compile_survives_a_new_session(compiled):
+    """A new session picks the run back up — but only when asked."""
     assert store.exists(), "the compile was never saved"
     fresh = AppTest.from_file(APP, default_timeout=60)
     fresh.run()
     assert not fresh.exception, [str(e.value) for e in fresh.exception]
+    # Nothing loads on its own: the offer describes the run, it does not show it.
+    assert "Step 1 of 4" in step_marker(fresh)
+    assert "A saved run is on disk" in rendered(fresh)
+    assert not fresh.session_state["result"]
+    click(fresh, "Restore last run")
     assert "Step 4 of 4" in step_marker(fresh)
     assert fresh.session_state["result"].spec is not None
     assert "Picked up where you left off" in rendered(fresh)
@@ -163,6 +169,7 @@ def test_a_compile_survives_a_new_session(compiled):
 def test_the_restored_run_keeps_the_verification_result(compiled):
     fresh = AppTest.from_file(APP, default_timeout=60)
     fresh.run()
+    click(fresh, "Restore last run")
     assert fresh.session_state["result"].report.passed
     assert "Ready for an agent to build" in rendered(fresh)
 
@@ -170,7 +177,7 @@ def test_the_restored_run_keeps_the_verification_result(compiled):
 def test_a_restored_run_can_be_discarded(walked):
     fresh = AppTest.from_file(APP, default_timeout=60)
     fresh.run()
-    assert "Picked up where you left off" in rendered(fresh)
+    assert "A saved run is on disk" in rendered(fresh)
     [b for b in fresh.button if "Discard" in b.label][0].click().run()
     assert "Step 1 of 4" in step_marker(fresh)
     assert fresh.session_state["claims"] is None

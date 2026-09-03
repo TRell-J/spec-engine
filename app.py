@@ -110,16 +110,6 @@ def init_state() -> None:
         "provider_widget", providers.spec_for(st.session_state["provider_key"]).label
     )
 
-    # A refresh starts a new Streamlit session. Put the user back where they
-    # were rather than throwing away a compile they paid for.
-    if not st.session_state.get("booted"):
-        st.session_state["booted"] = True
-        saved = store.load()
-        if saved is not None and saved.document.strip():
-            _restore(saved)
-            st.session_state["restored"] = True
-
-
 # Every one of these is read on steps 2-4, where its widget is not on screen.
 # Streamlit garbage-collects widget state for widgets it did not render, so the
 # value has to live under a key no widget owns, with the widget mirroring it.
@@ -271,6 +261,61 @@ def discard_saved_run() -> None:
     st.session_state["restored"] = False
     _clear_run(restore_draft=False)
     st.session_state["step"] = 0
+
+
+def restore_last_run() -> None:
+    """Load the stored run, but only because someone asked for it.
+
+    The file can vanish between the offer and the click; absent is rendered
+    as not-found everywhere, so a miss is a no-op rather than an error.
+    """
+    saved = store.load()
+    if saved is None:
+        return
+    _restore(saved)
+    st.session_state["restored_from_saved_at"] = saved.saved_at
+    st.session_state["restored"] = True
+
+
+def _saved_run_offer() -> None:
+    """Offer the stored run back — explicitly, metadata first.
+
+    Replaces the boot auto-restore: a stranger's document is never silently
+    on screen. Renders nothing at all when the store is off, and nothing
+    when there is no usable run — absent is absent everywhere.
+    """
+    if not store.enabled() or st.session_state.get("restored_from_saved_at"):
+        return
+    if (
+        st.session_state["step"]
+        or st.session_state["claims"] is not None
+        or st.session_state["result"] is not None
+        or st.session_state["example"]
+    ):
+        return  # the offer belongs to a fresh session, not one already at work
+    saved = store.load()
+    if saved is None or not saved.document.strip():
+        return
+    when = saved.saved_at.replace("T", " ")[:16] if saved.saved_at else "earlier"
+    model = saved.model or "model not recorded"
+    st.markdown(
+        theme.notice(f"A saved run is on disk: {saved.title} — {model}, saved {when}."),
+        **HTML,
+    )
+    left, right = st.columns(2)
+    left.button(
+        "Restore last run",
+        type="primary",
+        width="stretch",
+        on_click=restore_last_run,
+        key="restore-last-run",
+    )
+    right.button(
+        "Discard it and start fresh",
+        width="stretch",
+        on_click=discard_saved_run,
+        key="discard-saved-run",
+    )
 
 
 def go(step: int) -> None:
@@ -1287,6 +1332,8 @@ def main() -> None:
 
     if error := st.session_state.get("error"):
         st.error(error)
+
+    _saved_run_offer()
 
     if st.session_state.get("restored"):
         st.markdown(

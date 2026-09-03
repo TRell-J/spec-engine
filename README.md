@@ -83,7 +83,7 @@ With no model configured the compiler doesn't run. It will not generate a spec f
 | Requirements grammar | EARS, hand-written parser | A sentence either parses or it doesn't; no model in the loop |
 | Verification | Deterministic Python | The compiler may be probabilistic; the gate is not |
 | UI | Streamlit, four-screen wizard | One question per screen, after the GOV.UK "one thing per page" pattern |
-| Persistence | Local JSON, written atomically | A compile costs money; a browser refresh must not destroy it |
+| Persistence | Opt-in local JSON, written atomically | Off by default — a shared host must not hand one stranger's document to the next. Set `SPEC_ENGINE_STORE` where one person owns the data, and the run comes back only when **Restore last run** is clicked |
 
 ---
 
@@ -102,7 +102,17 @@ Pick a model in the **Model** panel on the first screen, or set it once in a `.e
 
 A compile is four model calls — low tens of cents on a frontier model, free on your own hardware. The app estimates before you spend and measures after; where it has no published rate for a model it shows token counts and says so rather than guessing.
 
-`pytest -q` runs 393 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
+`pytest -q` runs 409 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
+
+### Hosting it
+
+The app has no login, by design — which is safe only because everything shared fails closed. Persistence is one of those things: `SPEC_ENGINE_STORE` is **off unless you turn it on**. Unset or empty, a fresh session starts clean and nothing is written to disk. On a machine where one person owns the data, set a directory path — or `on` for the default `.spec_engine` — and runs are saved between sessions. The app then shows what is stored (title, model, when it was saved) and brings it back only when **Restore last run** is clicked; **Discard it and start fresh** deletes the file.
+
+```bash
+SPEC_ENGINE_STORE=off                     # the default — nothing read or written
+SPEC_ENGINE_STORE=on                      # opt in at ./.spec_engine
+SPEC_ENGINE_STORE=/var/lib/spec-engine    # opt in at an explicit path
+```
 
 ---
 
@@ -110,7 +120,7 @@ A compile is four model calls — low tens of cents on a frontier model, free on
 
 - **The prompts work but are not tuned.** They have run against live APIs and produced correct specs, but they have not been tuned against a corpus of real documents, and quality varies by model — a weaker model clears the gate with more repair rounds, or not at all.
 - **A decision-support tool, not an autonomous pipeline.** It produces a specification a person should read. Pointing an agent at `tasks.md` without reading `design.md` first defeats the purpose of the interrogation pass.
-- **Single user, local.** The run is saved to a JSON file on disk. No auth, no multi-user state, no server-side storage. A pasted API key lives in memory for the session and is never written to disk, but there is no secret management beyond that.
+- **Single user, local.** The run is saved to a JSON file on disk — only when you opt in with `SPEC_ENGINE_STORE`; off by default, so a hosted demo starts clean. No auth, no multi-user state, no server-side storage. A pasted API key lives in memory for the session and is never written to disk, but there is no secret management beyond that.
 - **Untested at document scale.** A forty-claim PRD produces a long scroll on the review screen with no grouping or filtering.
 - **All example data is fictional.** The deal desk, GenAI search and RevOps scenarios are invented for demonstration and reflect no real customer.
 

@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -207,8 +208,8 @@ def test_every_disabling_spelling_is_honoured(monkeypatch, value):
     assert not store.enabled()
 
 
-def test_persistence_is_on_by_default(monkeypatch, tmp_path, spec, document):
-    """A laptop is the normal case, and there a refresh must not lose work."""
+def test_a_path_opts_in_and_persists(monkeypatch, tmp_path, spec, document):
+    """A laptop is where persistence belongs — setting a path is the opt-in."""
     monkeypatch.setenv("SPEC_ENGINE_STORE", str(tmp_path / "store"))
     assert store.enabled()
     assert store.save(a_run(spec, document)) is not None
@@ -221,3 +222,38 @@ def test_an_explicit_path_still_works_when_disabled(monkeypatch, tmp_path, spec,
     target = tmp_path / "explicit.json"
     assert store.save(a_run(spec, document), path=target) == target
     assert store.load(path=target) is not None
+
+
+# --------------------------------------------------------------------------- #
+# Opt-in gating
+# --------------------------------------------------------------------------- #
+
+
+def test_an_unset_store_is_off(monkeypatch):
+    """Fresh checkouts and public hosts share nothing until told otherwise."""
+    monkeypatch.delenv("SPEC_ENGINE_STORE", raising=False)
+    assert not store.enabled()
+    assert store.save(a_run(document="x")) is None
+    assert store.load() is None
+
+
+def test_on_opts_in_at_the_default_directory(monkeypatch, tmp_path, spec, document):
+    monkeypatch.setenv("SPEC_ENGINE_STORE", "on")
+    assert store.enabled()
+    assert store.store_dir() == Path(store.DEFAULT_STORE_DIR)
+    monkeypatch.chdir(tmp_path)
+    store.save(a_run(spec, document))
+    assert (tmp_path / store.DEFAULT_STORE_DIR / "last_run.json").exists()
+
+
+@pytest.mark.parametrize("value", ["on", "ON", " true ", "true", "1", "yes", "enabled"])
+def test_every_on_word_opts_in_at_the_default_directory(monkeypatch, value):
+    monkeypatch.setenv("SPEC_ENGINE_STORE", value)
+    assert store.enabled()
+    assert store.store_dir() == Path(store.DEFAULT_STORE_DIR)
+
+
+def test_an_explicit_path_opts_in_at_that_directory(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPEC_ENGINE_STORE", str(tmp_path / "elsewhere"))
+    assert store.enabled()
+    assert store.store_dir() == Path(tmp_path / "elsewhere")

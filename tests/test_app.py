@@ -11,6 +11,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from conftest import FakeClient
+from core import store
 
 APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
 
@@ -547,3 +548,81 @@ def test_the_example_never_claims_to_have_read_your_document(monkeypatch):
     rendered = " ".join(m.value for m in app.markdown)
     assert "Verified against your document" not in rendered
     assert "example document" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# The stored run is offered, never assumed
+# --------------------------------------------------------------------------- #
+
+RESTORED_DOC = "Restored run sentinel — the saved draft text."
+
+
+def seed_run(**overrides) -> store.SavedRun:
+    """A minimal saved run in the per-test store the offline fixture points at."""
+    run = store.SavedRun(
+        title="Nightly export",
+        document=RESTORED_DOC,
+        step=1,
+        model="claude-opus-5",
+        **overrides,
+    )
+    store.save(run)
+    return run
+
+
+def test_a_fresh_session_does_not_auto_restore(monkeypatch):
+    """The old boot auto-restore handed a stranger's run to whoever came next."""
+    seed_run()
+    app = boot(monkeypatch)
+    assert "Step 1 of 4" in step_marker(app)
+    assert app.session_state["step"] == 0
+    assert app.session_state["claims"] is None
+    assert app.session_state["result"] is None
+    assert RESTORED_DOC not in app.text_area[0].value
+
+
+def test_a_saved_run_is_offered_metadata_first(monkeypatch):
+    saved = seed_run()
+    app = boot(monkeypatch)
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Nightly export" in rendered
+    assert "claude-opus-5" in rendered
+    assert saved.saved_at.replace("T", " ")[:16] in rendered
+    assert [b for b in app.button if "Restore last run" in b.label]
+    # Metadata first: the run itself is not on screen until someone asks.
+    assert RESTORED_DOC not in app.text_area[0].value
+
+
+def test_restoring_loads_the_run_behind_the_button(monkeypatch):
+    seed_run()
+    app = boot(monkeypatch)
+    click(app, "Restore last run")
+    assert app.text_area[0].value == RESTORED_DOC
+    assert app.session_state["step"] == 1
+    assert app.session_state["restored"] is True
+    assert not [b for b in app.button if "Restore last run" in b.label]
+    assert [b for b in app.button if "Discard" in b.label]
+
+
+def test_discarding_the_offer_clears_the_stored_run(monkeypatch):
+    seed_run()
+    app = boot(monkeypatch)
+    click(app, "Discard it and start fresh")
+    assert not store.exists()
+    assert "Step 1 of 4" in step_marker(app)
+    assert not [b for b in app.button if "Restore last run" in b.label]
+
+
+def test_an_absent_run_is_just_not_there(monkeypatch):
+    """Uniformly not-found: no run, no offer, no special-cased message."""
+    app = boot(monkeypatch)
+    assert not [b for b in app.button if "Restore last run" in b.label]
+    assert "saved run" not in " ".join(m.value for m in app.markdown).lower()
+
+
+def test_a_disabled_store_renders_nothing_even_over_a_saved_run(monkeypatch):
+    seed_run()
+    monkeypatch.setenv("SPEC_ENGINE_STORE", "off")
+    app = boot(monkeypatch)
+    assert not [b for b in app.button if "Restore last run" in b.label]
+    assert "Nightly export" not in " ".join(m.value for m in app.markdown)
