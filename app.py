@@ -131,8 +131,17 @@ _MIRRORED = {
 }
 
 
+
+
+
 def _mirror(canonical: str) -> None:
-    """Copy a widget's value back to the key that survives the screen."""
+    """Copy a widget's value back to the key that survives the screen.
+
+    The mirrored keys are the pricing identity (model, base URL), so
+    whatever the tally already earned is banked first: a finished pass is
+    priced where it ran, never at the identity typed in afterwards.
+    """
+    _freeze_usage_segment()
     st.session_state[canonical] = st.session_state.get(_MIRRORED[canonical], "")
 
 
