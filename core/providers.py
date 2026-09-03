@@ -782,6 +782,52 @@ def _validate_url(url: str, source: str) -> None:
             )
 
 
+class _ValidatingRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that re-runs the URL policy on every hop.
+
+    urllib follows redirects with the original headers attached, so without
+    this a first-hop host (or an open redirector on it) could launder the
+    request to a target the policy just refused — with the Authorization
+    header still attached. Every hop is validated against the provenance the
+    chain started with, and the Authorization header is dropped when a hop
+    changes host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        provenance = getattr(req, "provenance", "ui")
+        _validate_url(newurl, provenance)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        redirected.provenance = provenance  # every hop re-checks the origin
+        if urlsplit(newurl).hostname != urlsplit(req.full_url).hostname:
+            redirected.headers.pop("Authorization", None)
+        return redirected
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """The stock opener, minus every handler that could answer a non-web
+    scheme. No FileHandler, FTPHandler or DataHandler: the validator above is
+    the gate, and this is the backstop — nothing here can turn a URL into a
+    local file read even if the gate were bypassed. (build_opener cannot
+    leave these out, so the opener is assembled by hand.)
+    """
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler(),  # the operator's proxy config, honoured
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        _ValidatingRedirects(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+_OPENER = _build_opener()
+
+
 #: A compile on local hardware is slow; an unbounded wait is how one
 #: black-holed request pins a worker thread for ten minutes.
 DEFAULT_TIMEOUT_SECONDS = 300.0
@@ -823,8 +869,9 @@ def _send(
         headers=headers,
         method="GET" if body is None else "POST",
     )
+    request.provenance = source  # rides along; the redirect handler re-checks
     try:
-        with urllib.request.urlopen(request, timeout=_request_timeout()) as response:
+        with _OPENER.open(request, timeout=_request_timeout()) as response:
             return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as refusal:
         # The body of a 4xx carries the server's explanation, which is the
