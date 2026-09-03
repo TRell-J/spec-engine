@@ -679,3 +679,110 @@ def test_an_unreadable_timeout_falls_back_to_the_default(monkeypatch, raw):
     monkeypatch.setenv("SPEC_ENGINE_TIMEOUT_SECONDS", raw)
     assert providers._request_timeout() == 300.0
 
+
+# --------------------------------------------------------------------------- #
+# Key provenance: server keys are opt-in for interactive sessions
+# --------------------------------------------------------------------------- #
+
+
+def test_a_visitor_key_resolves_with_ui_provenance():
+    settings = providers.resolve_settings({"provider": "openai", "api_key": "sk-visitor"})
+    assert settings.api_key == "sk-visitor"
+    assert settings.key_provenance == "ui"
+    assert settings.configured
+
+
+def test_flag_off_still_honours_a_visitor_key():
+    """The gate is about whose key runs, not whether a key can exist."""
+    settings = providers.resolve_settings(
+        {"provider": "openai", "api_key": "sk-visitor"}, allow_env_keys=False
+    )
+    assert settings.api_key == "sk-visitor"
+    assert settings.key_provenance == "ui"
+    assert settings.configured
+
+
+def test_an_environment_key_resolves_with_server_provenance(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    settings = providers.resolve_settings({"provider": "openai"})
+    assert settings.api_key == "sk-host"
+    assert settings.key_provenance == "server"
+
+
+def test_the_gateway_token_belongs_to_the_server_chain(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-gateway")
+    settings = providers.resolve_settings({"provider": "anthropic"})
+    assert settings.api_key == "sk-gateway"
+    assert settings.key_provenance == "server"
+
+
+def test_flag_off_ignores_the_whole_environment_chain(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    monkeypatch.setenv("SPEC_ENGINE_API_KEY", "sk-generic")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "sk-gateway")
+    settings = providers.resolve_settings({"provider": "openai"}, allow_env_keys=False)
+    assert settings.api_key == ""
+    assert settings.key_provenance == "none"
+    assert not settings.configured
+
+
+def test_a_server_key_works_with_the_preset_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    settings = providers.resolve_settings({"provider": "openai"})
+    assert settings.key_provenance == "server"
+    assert settings.base_url_source == "preset"
+    assert settings.configured
+
+
+def test_a_server_key_works_with_an_operator_env_url(monkeypatch):
+    """env key + env URL is the operator's own configuration, all of it."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    monkeypatch.setenv("SPEC_ENGINE_BASE_URL", "http://localhost:8000/v1")
+    settings = providers.resolve_settings({"provider": "openai"})
+    assert settings.key_provenance == "server"
+    assert settings.base_url_source == "env"
+
+
+def test_a_server_key_and_a_visitor_url_are_refused(monkeypatch):
+    """Wherever the visitor's URL points decides where the operator's
+    credentials travel — the combination is refused outright."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    with pytest.raises(providers.ProviderError, match="preset URL"):
+        providers.resolve_settings(
+            {"provider": "openai", "base_url": "https://api.example.com/v1"}
+        )
+
+
+def test_flag_off_never_triggers_the_url_refusal(monkeypatch):
+    """With no server key in play, a visitor URL has nothing to pair with."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    settings = providers.resolve_settings(
+        {"provider": "openai", "base_url": "https://api.example.com/v1"},
+        allow_env_keys=False,
+    )
+    assert settings.key_provenance == "none"
+    assert settings.base_url_source == "ui"
+    assert not settings.configured
+
+
+def test_keyless_interactive_sessions_build_no_client(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    settings = providers.resolve_settings({"provider": "openai"}, allow_env_keys=False)
+    assert providers.build(settings) is None
+
+
+def test_a_keyless_check_never_touches_the_wire(monkeypatch):
+    """Keyless + flag off: the pre-flight asks for a key instead of sending a
+    doomed anonymous request — on a hosted endpoint that round trip still
+    happens, and zero is the only number that costs nothing."""
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-host")
+    settings = providers.resolve_settings(
+        {"provider": "openai", "base_url": "https://api.example.com/v1"},
+        allow_env_keys=False,
+    )
+    transport = Transport()  # nothing scripted: any call trips an assertion
+    provider = OpenAICompatProvider(settings=settings, transport=transport)
+    with pytest.raises(providers.ProviderError, match="Add an API key"):
+        provider.check()
+    assert transport.calls == []
+

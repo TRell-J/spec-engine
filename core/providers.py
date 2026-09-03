@@ -363,6 +363,7 @@ def resolve_settings(
         hosted_locally=spec.hosted_locally,
         note=spec.note,
         base_url_source=base_url_source,
+        key_provenance=key_provenance,
     )
 
 

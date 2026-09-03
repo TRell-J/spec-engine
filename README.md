@@ -102,7 +102,7 @@ Pick a model in the **Model** panel on the first screen, or set it once in a `.e
 
 A compile is four model calls — low tens of cents on a frontier model, free on your own hardware. The app estimates before you spend and measures after; where it has no published rate for a model it shows token counts and says so rather than guessing.
 
-`pytest -q` runs 409 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
+`pytest -q` runs 454 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
 
 ### Hosting it
 

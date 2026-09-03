@@ -626,3 +626,39 @@ def test_a_disabled_store_renders_nothing_even_over_a_saved_run(monkeypatch):
     app = boot(monkeypatch)
     assert not [b for b in app.button if "Restore last run" in b.label]
     assert "Nightly export" not in " ".join(m.value for m in app.markdown)
+
+
+# --------------------------------------------------------------------------- #
+# Server keys are opt-in
+# --------------------------------------------------------------------------- #
+
+
+def test_the_billing_notice_renders_when_a_server_key_is_in_use(monkeypatch):
+    monkeypatch.setenv("SPEC_ENGINE_ALLOW_SERVER_KEY", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    assert "billed to the operator" in " ".join(m.value for m in app.markdown)
+
+
+def test_no_billing_notice_while_the_flag_is_off(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "billed to the operator" not in rendered
+
+
+def test_the_key_state_stays_visible_when_configured(monkeypatch):
+    """The Model panel no longer collapses once the app is configured: the
+    key field — empty, and where a key would come from — stays on screen."""
+    monkeypatch.setenv("SPEC_ENGINE_ALLOW_SERVER_KEY", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
+    app = AppTest.from_file(APP, default_timeout=60)
+    app.run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    assert any("Model ·" in e.label for e in app.expander)
+    assert any(t.key == "api_key_widget" for t in app.text_input)
+
