@@ -3,6 +3,8 @@
 import json
 import os
 
+import pytest
+
 from core import pricing, store
 from core.verifier import verify
 
@@ -179,3 +181,43 @@ def test_a_restored_run_remembers_which_endpoint_produced_it(spec, document):
     assert pricing.actual_cost(
         99_000, 40_000, restored.model, base_url=restored.base_url
     ) == 0
+
+
+# --------------------------------------------------------------------------- #
+# Shared deployments
+# --------------------------------------------------------------------------- #
+
+
+def test_persistence_can_be_turned_off(monkeypatch, spec, document):
+    """One process serves every visitor on a hosted deployment.
+
+    Without this switch, the next stranger to open the app would be handed the
+    last stranger's document.
+    """
+    monkeypatch.setenv("SPEC_ENGINE_STORE", "off")
+    assert not store.enabled()
+    assert store.save(a_run(spec, document)) is None
+    assert store.load() is None
+    assert store.exists() is False
+
+
+@pytest.mark.parametrize("value", ["off", "OFF", "none", "no", "0", "disabled", " "])
+def test_every_disabling_spelling_is_honoured(monkeypatch, value):
+    monkeypatch.setenv("SPEC_ENGINE_STORE", value)
+    assert not store.enabled()
+
+
+def test_persistence_is_on_by_default(monkeypatch, tmp_path, spec, document):
+    """A laptop is the normal case, and there a refresh must not lose work."""
+    monkeypatch.setenv("SPEC_ENGINE_STORE", str(tmp_path / "store"))
+    assert store.enabled()
+    assert store.save(a_run(spec, document)) is not None
+    assert store.load() is not None
+
+
+def test_an_explicit_path_still_works_when_disabled(monkeypatch, tmp_path, spec, document):
+    """The switch governs the default location, not the module."""
+    monkeypatch.setenv("SPEC_ENGINE_STORE", "off")
+    target = tmp_path / "explicit.json"
+    assert store.save(a_run(spec, document), path=target) == target
+    assert store.load(path=target) is not None

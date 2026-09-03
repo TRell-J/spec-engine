@@ -26,6 +26,21 @@ from .verifier import VerificationReport
 DEFAULT_STORE_DIR = ".spec_engine"
 FORMAT_VERSION = 1
 
+#: Values of SPEC_ENGINE_STORE that turn persistence off entirely.
+DISABLED = {"off", "none", "no", "0", "disabled", ""}
+
+
+def enabled() -> bool:
+    """Is saving runs to disk appropriate here?
+
+    It is exactly right on one person's laptop — a compile costs money and a
+    browser refresh must not destroy it. It is exactly wrong on a shared
+    deployment, where one process serves every visitor: the next stranger to
+    open the app would be handed the last stranger's document. Public
+    deployments set SPEC_ENGINE_STORE=off.
+    """
+    return os.getenv("SPEC_ENGINE_STORE", DEFAULT_STORE_DIR).strip().lower() not in DISABLED
+
 
 def store_dir() -> Path:
     """Resolved per call, not at import, so tests and users can redirect it."""
@@ -83,8 +98,13 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def save(run: SavedRun, path: Optional[Path] = None) -> Path:
-    """Write atomically: a half-written file must never replace a good one."""
+def save(run: SavedRun, path: Optional[Path] = None) -> Optional[Path]:
+    """Write atomically: a half-written file must never replace a good one.
+
+    Returns None without writing when persistence is disabled.
+    """
+    if path is None and not enabled():
+        return None
     path = path or run_file()
     run.saved_at = _now()
     run.version = FORMAT_VERSION
@@ -107,6 +127,8 @@ def load(path: Optional[Path] = None) -> Optional[SavedRun]:
     A corrupt or outdated file is treated as absent rather than fatal — losing
     a restore is an inconvenience, refusing to start is not acceptable.
     """
+    if path is None and not enabled():
+        return None
     path = path or run_file()
     if not path.exists():
         return None
@@ -131,4 +153,6 @@ def clear(path: Optional[Path] = None) -> None:
 
 
 def exists(path: Optional[Path] = None) -> bool:
+    if path is None and not enabled():
+        return False
     return (path or run_file()).exists()

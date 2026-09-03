@@ -15,6 +15,7 @@ Run with:  streamlit run app.py
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 import streamlit as st
@@ -38,6 +39,23 @@ from core.verifier import VerificationReport, assess_source, verify
 from examples import registry
 
 load_dotenv()
+
+
+def _adopt_secrets() -> None:
+    """A hosted deployment is configured through secrets, not a .env file.
+
+    Copied in with setdefault so a real environment variable always wins, and
+    wrapped because having no secrets at all is the normal local case.
+    """
+    try:
+        for key, value in st.secrets.items():
+            if isinstance(value, str):
+                os.environ.setdefault(key, value)
+    except Exception:
+        pass
+
+
+_adopt_secrets()
 
 st.set_page_config(
     page_title="Spec-Engine",
