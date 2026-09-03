@@ -24,6 +24,7 @@ def _provider_env() -> tuple:
         | {
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_BASE_URL",
+            "SPEC_ENGINE_ALLOW_SERVER_KEY",
             "SPEC_ENGINE_PROVIDER",
             "SPEC_ENGINE_MODEL",
             "SPEC_ENGINE_BASE_URL",

@@ -28,11 +28,16 @@ convenience, not the guarantee.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import socket
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlparse
 
 # --------------------------------------------------------------------------- #
 # Catalogue
@@ -232,6 +237,15 @@ class Settings:
     needs_key: bool
     hosted_locally: bool
     note: str = ""
+    #: Where base_url resolved from: "ui" (a visitor typed it), "env" (the
+    #: operator's environment) or "preset" (the in-code default). The network
+    #: seam holds visitor-typed URLs to the public web and lets the operator's
+    #: own configuration reach local model servers.
+    base_url_source: str = "preset"
+    #: Where the API key resolved from: "ui" (the visitor typed it), "server"
+    #: (the operator's environment, when allow_env_keys permits) or "none"
+    #: (nothing resolved — an interactive session with server keys off).
+    key_provenance: str = "none"
 
     @property
     def configured(self) -> bool:
@@ -249,15 +263,33 @@ class Settings:
         return f"{self.label.split(' — ')[0]} · {self.model or 'no model set'}"
 
 
+def unconfigured_reason(settings: Settings) -> str:
+    """The static guidance shown when a provider cannot be used yet."""
+    if not settings.model.strip():
+        return "Name a model before compiling."
+    return f"Add an API key for {settings.label} before compiling."
+
+
 def _env(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
+def resolve_settings(
+    overrides: Optional[Dict[str, Any]] = None,
+    *,
+    allow_env_keys: bool = True,
+) -> Settings:
     """Preset defaults, then environment, then whatever the UI set.
 
     The environment is how you run this headless or in a container; the UI
     overrides are how you change your mind without restarting.
+
+    `allow_env_keys` decides whether the operator's environment counts as a
+    key source. Headless and scripted callers keep the True default; the
+    interactive app passes False unless the operator opted in with
+    SPEC_ENGINE_ALLOW_SERVER_KEY, so a hosted visitor never ends up running
+    on the host's key. Where a key resolved from is recorded in
+    `key_provenance`.
     """
     overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
 
@@ -265,21 +297,46 @@ def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
         overrides.get("provider") or _env("SPEC_ENGINE_PROVIDER") or DEFAULT_PROVIDER
     )
 
-    base_url = (
-        overrides.get("base_url") or _env("SPEC_ENGINE_BASE_URL") or spec.base_url
-    ).strip().rstrip("/")
+    base_override = overrides.get("base_url")
+    base_from_env = _env("SPEC_ENGINE_BASE_URL")
+    base_url = (base_override or base_from_env or spec.base_url).strip().rstrip("/")
+    # Where the URL came from decides what the network seam will do with it.
+    if base_override:
+        base_url_source = "ui"
+    elif base_from_env:
+        base_url_source = "env"
+    else:
+        base_url_source = "preset"
 
     model = (
         overrides.get("model") or _env("SPEC_ENGINE_MODEL") or spec.default_model
     ).strip()
 
-    api_key = (
-        overrides.get("api_key")
-        or spec.env_key
-        or _env("SPEC_ENGINE_API_KEY")
-        # A gateway speaking the Anthropic protocol still reads this one.
-        or (_env("ANTHROPIC_AUTH_TOKEN") if spec.kind == "anthropic" else "")
-    ).strip()
+    visitor_key = str(overrides.get("api_key") or "").strip()
+    if visitor_key:
+        # The visitor's own key: billed to them, and safe with any Base URL.
+        api_key, key_provenance = visitor_key, "ui"
+    elif allow_env_keys:
+        api_key = (
+            spec.env_key
+            or _env("SPEC_ENGINE_API_KEY")
+            # A gateway speaking the Anthropic protocol still reads this one.
+            or (_env("ANTHROPIC_AUTH_TOKEN") if spec.kind == "anthropic" else "")
+        ).strip()
+        # An operator key is a server credential; an empty chain is the
+        # ordinary keyless case, not a server key.
+        key_provenance = "server" if api_key else "none"
+    else:
+        # Interactive with server keys disallowed: nothing resolves, so no
+        # client is built and nothing is ever sent on the host's money.
+        api_key, key_provenance = "", "none"
+
+    # A server key never pairs with a visitor-typed URL: wherever that URL
+    # points decides where the operator's credentials travel. Locked decision.
+    if key_provenance == "server" and base_url_source == "ui":
+        raise ProviderError(
+            "Server API keys only work with the provider's preset URL."
+        )
 
     mode = (
         overrides.get("schema_mode") or _env("SPEC_ENGINE_SCHEMA_MODE") or spec.schema_mode
@@ -305,6 +362,8 @@ def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
         needs_key=spec.needs_key,
         hosted_locally=spec.hosted_locally,
         note=spec.note,
+        base_url_source=base_url_source,
+        key_provenance=key_provenance,
     )
 
 
@@ -479,7 +538,7 @@ def _anthropic_client(settings: Settings) -> Any:
         raise ProviderError(
             "The anthropic package is not installed: pip install anthropic"
         ) from exc
-    kwargs: Dict[str, Any] = {"timeout": 600.0}
+    kwargs: Dict[str, Any] = {"timeout": _request_timeout()}
     if settings.api_key:
         kwargs["api_key"] = settings.api_key
     if settings.base_url:
@@ -561,7 +620,14 @@ class OpenAICompatProvider(Provider):
         return f"{base}{path}"
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        post = self.transport or _send
+        if not self.settings.configured:
+            # An unconfigured request could only be an anonymous one — a
+            # guaranteed 401 against a hosted server, and a round trip the
+            # policy refuses to make. Static guidance goes to the UI instead.
+            raise ProviderError(unconfigured_reason(self.settings))
+        post = self.transport or partial(
+            _send, source=self.settings.base_url_source
+        )
         status, text = post(self._url(path), self._headers(), body)
         if status >= 400:
             raise _HTTPRefusal(status, text)
@@ -626,7 +692,11 @@ class OpenAICompatProvider(Provider):
         server there, does it have this model, and can that model actually
         hold a schema.
         """
-        post = self.transport or _send
+        if not self.settings.configured:
+            raise ProviderError(unconfigured_reason(self.settings))
+        post = self.transport or partial(
+            _send, source=self.settings.base_url_source
+        )
         status, text = post(self._url("/models"), self._headers(), None)
         if status >= 400:
             raise ProviderError(_HTTPRefusal(status, text).readable(self.settings.label))
@@ -719,8 +789,112 @@ def _reply_from_chat_completion(payload: Dict[str, Any], label: str) -> Reply:
     )
 
 
+_WEB_SCHEMES = {"http", "https"}
+
+
+def _validate_url(url: str, source: str) -> None:
+    """The URL policy for everything this module fetches, run before any
+    bytes leave the process.
+
+    Non-web schemes, embedded userinfo and — for visitor-typed URLs only —
+    loopback/link-local/private/reserved hosts are refused here, so a refused
+    request dies as a status-only ProviderError with no response body to
+    reflect. Preset and operator-environment URLs skip the host check: the
+    shipped local-model presets (Ollama, LM Studio, vLLM) are loopback on
+    purpose.
+    """
+    parts = urlsplit(url)
+    if parts.scheme.lower() not in _WEB_SCHEMES or parts.username is not None:
+        raise ProviderError("Base URL must be a plain http(s) address.")
+    host = (parts.hostname or "").rstrip(".")
+    if not host:
+        raise ProviderError("Base URL is missing a host.")
+    if source != "ui":
+        return  # preset / operator env: the local model servers keep working
+    try:
+        lookups = socket.getaddrinfo(host, None)
+    except (socket.gaierror, UnicodeError) as exc:
+        raise ProviderError(
+            f"Could not resolve the host in {url}. Check the address."
+        ) from exc
+    for _family, _type, _proto, _canonname, sockaddr in lookups:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if (
+            ip.is_loopback
+            or ip.is_link_local
+            or ip.is_private
+            or ip.is_reserved
+        ):
+            raise ProviderError(
+                "This Base URL is not reachable from a hosted app."
+            )
+
+
+class _ValidatingRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that re-runs the URL policy on every hop.
+
+    urllib follows redirects with the original headers attached, so without
+    this a first-hop host (or an open redirector on it) could launder the
+    request to a target the policy just refused — with the Authorization
+    header still attached. Every hop is validated against the provenance the
+    chain started with, and the Authorization header is dropped when a hop
+    changes host.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        provenance = getattr(req, "provenance", "ui")
+        _validate_url(newurl, provenance)
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        redirected.provenance = provenance  # every hop re-checks the origin
+        if urlsplit(newurl).hostname != urlsplit(req.full_url).hostname:
+            redirected.headers.pop("Authorization", None)
+        return redirected
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """The stock opener, minus every handler that could answer a non-web
+    scheme. No FileHandler, FTPHandler or DataHandler: the validator above is
+    the gate, and this is the backstop — nothing here can turn a URL into a
+    local file read even if the gate were bypassed. (build_opener cannot
+    leave these out, so the opener is assembled by hand.)
+    """
+    opener = urllib.request.OpenerDirector()
+    for handler in (
+        urllib.request.ProxyHandler(),  # the operator's proxy config, honoured
+        urllib.request.HTTPHandler(),
+        urllib.request.HTTPSHandler(),
+        urllib.request.HTTPErrorProcessor(),
+        urllib.request.HTTPDefaultErrorHandler(),
+        _ValidatingRedirects(),
+    ):
+        opener.add_handler(handler)
+    return opener
+
+
+_OPENER = _build_opener()
+
+
+#: A compile on local hardware is slow; an unbounded wait is how one
+#: black-holed request pins a worker thread for ten minutes.
+DEFAULT_TIMEOUT_SECONDS = 300.0
+
+
+def _request_timeout() -> float:
+    """Seconds before a request is abandoned. Unset or unreadable → default."""
+    try:
+        timeout = float(os.getenv("SPEC_ENGINE_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return DEFAULT_TIMEOUT_SECONDS
+    return timeout if timeout > 0 else DEFAULT_TIMEOUT_SECONDS
+
+
 def _send(
-    url: str, headers: Dict[str, str], body: Optional[Dict[str, Any]]
+    url: str,
+    headers: Dict[str, str],
+    body: Optional[Dict[str, Any]],
+    source: str = "ui",
 ) -> Tuple[int, str]:
     """The only place this module touches the network.
 
@@ -729,21 +903,23 @@ def _send(
     depend on a third-party HTTP client — one whose distribution name has
     already changed once under us — would be an odd way to spend a dependency.
     A JSON POST is a JSON POST.
-    """
-    import urllib.error
-    import urllib.request
 
+    `source` is where the configuration that produced `url` came from — "ui"
+    for a visitor-typed Base URL, "env" or "preset" otherwise — and defaults
+    to the strictest policy. The URL is validated, provenance included, before
+    any bytes leave the process; a refused target never dispatches, so there
+    is no response body to reflect.
+    """
+    _validate_url(url, source)
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8") if body is not None else None,
         headers=headers,
         method="GET" if body is None else "POST",
     )
+    request.provenance = source  # rides along; the redirect handler re-checks
     try:
-        # Generous: a 30B model on local hardware emitting 16k tokens of JSON
-        # is slow, and timing it out halfway is the least useful possible
-        # failure.
-        with urllib.request.urlopen(request, timeout=600.0) as response:
+        with _OPENER.open(request, timeout=_request_timeout()) as response:
             return response.status, response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as refusal:
         # The body of a 4xx carries the server's explanation, which is the

@@ -1,0 +1,7 @@
+# Ruff gate: classic default rule set, pinned explicitly.
+# Ruff 0.16 expanded its default rule set (59 -> 413 rules), surfacing 275
+# pre-existing findings (238 mechanical modernizations, 8 deliberate
+# fail-closed exception handlers) that violate this PR's minimal-diff and
+# no-behavior-change guardrails. The classic default set (E4, E7, E9, F) is
+# verified clean at 0.16. Grow the rule set only with a dedicated cleanup PR.
+lint.select = ["E4", "E7", "E9", "F"]
