@@ -3,7 +3,14 @@
 A compile costs real money. Streamlit session state lives only as long as the
 websocket, which means a reload, a dropped connection or a server restart
 silently throws the result away. This module writes the run to a local JSON
-file after every step that changes it, and restores it on startup.
+file after every step that changes it.
+
+Persistence is opt-in. On a shared or public deployment one process serves
+every visitor, and a shared file would hand one stranger's document to the
+next — so an unset SPEC_ENGINE_STORE means off. Set a directory path — or
+'on' — on a machine where one person owns the data, and the app offers the
+run back through an explicit, metadata-first restore instead of putting it
+on screen unasked.
 
 Local, single-user, plain JSON on purpose: the file is readable, deletable, and
 carries nothing but what the user already had.
@@ -29,22 +36,31 @@ FORMAT_VERSION = 1
 #: Values of SPEC_ENGINE_STORE that turn persistence off entirely.
 DISABLED = {"off", "none", "no", "0", "disabled", ""}
 
+#: Values of SPEC_ENGINE_STORE that opt in at the default directory.
+ON_WORDS = {"on", "true", "1", "yes", "enabled"}
+
 
 def enabled() -> bool:
-    """Is saving runs to disk appropriate here?
+    """Persistence is opt-in. Set a directory path — or 'on' — on a machine
+    where one person owns the data. Unset means off.
 
     It is exactly right on one person's laptop — a compile costs money and a
     browser refresh must not destroy it. It is exactly wrong on a shared
     deployment, where one process serves every visitor: the next stranger to
-    open the app would be handed the last stranger's document. Public
-    deployments set SPEC_ENGINE_STORE=off.
+    open the app would be handed the last stranger's document.
     """
-    return os.getenv("SPEC_ENGINE_STORE", DEFAULT_STORE_DIR).strip().lower() not in DISABLED
+    val = os.getenv("SPEC_ENGINE_STORE", "").strip().lower()
+    return bool(val) and val not in DISABLED
 
 
 def store_dir() -> Path:
     """Resolved per call, not at import, so tests and users can redirect it."""
-    return Path(os.getenv("SPEC_ENGINE_STORE", DEFAULT_STORE_DIR))
+    val = os.getenv("SPEC_ENGINE_STORE", "").strip()
+    return (
+        Path(DEFAULT_STORE_DIR)
+        if val.lower() in ON_WORDS
+        else Path(val or DEFAULT_STORE_DIR)
+    )
 
 
 def run_file() -> Path:
