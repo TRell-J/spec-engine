@@ -242,6 +242,10 @@ class Settings:
     #: seam holds visitor-typed URLs to the public web and lets the operator's
     #: own configuration reach local model servers.
     base_url_source: str = "preset"
+    #: Where the API key resolved from: "ui" (the visitor typed it), "server"
+    #: (the operator's environment, when allow_env_keys permits) or "none"
+    #: (nothing resolved — an interactive session with server keys off).
+    key_provenance: str = "none"
 
     @property
     def configured(self) -> bool:
@@ -259,15 +263,33 @@ class Settings:
         return f"{self.label.split(' — ')[0]} · {self.model or 'no model set'}"
 
 
+def unconfigured_reason(settings: Settings) -> str:
+    """The static guidance shown when a provider cannot be used yet."""
+    if not settings.model.strip():
+        return "Name a model before compiling."
+    return f"Add an API key for {settings.label} before compiling."
+
+
 def _env(name: str) -> str:
     return os.getenv(name, "").strip()
 
 
-def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
+def resolve_settings(
+    overrides: Optional[Dict[str, Any]] = None,
+    *,
+    allow_env_keys: bool = True,
+) -> Settings:
     """Preset defaults, then environment, then whatever the UI set.
 
     The environment is how you run this headless or in a container; the UI
     overrides are how you change your mind without restarting.
+
+    `allow_env_keys` decides whether the operator's environment counts as a
+    key source. Headless and scripted callers keep the True default; the
+    interactive app passes False unless the operator opted in with
+    SPEC_ENGINE_ALLOW_SERVER_KEY, so a hosted visitor never ends up running
+    on the host's key. Where a key resolved from is recorded in
+    `key_provenance`.
     """
     overrides = {k: v for k, v in (overrides or {}).items() if v not in (None, "")}
 
@@ -290,13 +312,31 @@ def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
         overrides.get("model") or _env("SPEC_ENGINE_MODEL") or spec.default_model
     ).strip()
 
-    api_key = (
-        overrides.get("api_key")
-        or spec.env_key
-        or _env("SPEC_ENGINE_API_KEY")
-        # A gateway speaking the Anthropic protocol still reads this one.
-        or (_env("ANTHROPIC_AUTH_TOKEN") if spec.kind == "anthropic" else "")
-    ).strip()
+    visitor_key = str(overrides.get("api_key") or "").strip()
+    if visitor_key:
+        # The visitor's own key: billed to them, and safe with any Base URL.
+        api_key, key_provenance = visitor_key, "ui"
+    elif allow_env_keys:
+        api_key = (
+            spec.env_key
+            or _env("SPEC_ENGINE_API_KEY")
+            # A gateway speaking the Anthropic protocol still reads this one.
+            or (_env("ANTHROPIC_AUTH_TOKEN") if spec.kind == "anthropic" else "")
+        ).strip()
+        # An operator key is a server credential; an empty chain is the
+        # ordinary keyless case, not a server key.
+        key_provenance = "server" if api_key else "none"
+    else:
+        # Interactive with server keys disallowed: nothing resolves, so no
+        # client is built and nothing is ever sent on the host's money.
+        api_key, key_provenance = "", "none"
+
+    # A server key never pairs with a visitor-typed URL: wherever that URL
+    # points decides where the operator's credentials travel. Locked decision.
+    if key_provenance == "server" and base_url_source == "ui":
+        raise ProviderError(
+            "Server API keys only work with the provider's preset URL."
+        )
 
     mode = (
         overrides.get("schema_mode") or _env("SPEC_ENGINE_SCHEMA_MODE") or spec.schema_mode
@@ -579,6 +619,11 @@ class OpenAICompatProvider(Provider):
         return f"{base}{path}"
 
     def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.settings.configured:
+            # An unconfigured request could only be an anonymous one — a
+            # guaranteed 401 against a hosted server, and a round trip the
+            # policy refuses to make. Static guidance goes to the UI instead.
+            raise ProviderError(unconfigured_reason(self.settings))
         post = self.transport or partial(
             _send, source=self.settings.base_url_source
         )
@@ -646,6 +691,8 @@ class OpenAICompatProvider(Provider):
         server there, does it have this model, and can that model actually
         hold a schema.
         """
+        if not self.settings.configured:
+            raise ProviderError(unconfigured_reason(self.settings))
         post = self.transport or partial(
             _send, source=self.settings.base_url_source
         )

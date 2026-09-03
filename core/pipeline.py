@@ -51,8 +51,12 @@ T = TypeVar("T", bound=BaseModel)
 # and it only ever sees a `Provider`.
 
 
-def resolve_settings(overrides: Optional[Dict[str, Any]] = None) -> Settings:
-    return providers.resolve_settings(overrides)
+def resolve_settings(
+    overrides: Optional[Dict[str, Any]] = None,
+    *,
+    allow_env_keys: bool = True,
+) -> Settings:
+    return providers.resolve_settings(overrides, allow_env_keys=allow_env_keys)
 
 
 def resolve_model() -> str:
@@ -75,13 +79,16 @@ def has_credentials(overrides: Optional[Dict[str, Any]] = None) -> bool:
 def build_client(
     api_key: Optional[str] = None,
     overrides: Optional[Dict[str, Any]] = None,
+    allow_env_keys: bool = True,
 ) -> Optional[Provider]:
     """Return a provider for the current settings, or None if unusable."""
     merged = dict(overrides or {})
     if api_key:
         merged["api_key"] = api_key
     try:
-        return providers.build(resolve_settings(merged))
+        return providers.build(
+            resolve_settings(merged, allow_env_keys=allow_env_keys)
+        )
     except ProviderError:
         return None
 
