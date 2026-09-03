@@ -115,3 +115,18 @@ def test_actual_cost_of_a_realistic_run_is_plausible():
 def test_detail_names_the_calls_and_tokens():
     detail = pricing.estimate_compile("word " * 500, "claude-opus-5").detail
     assert "4 model calls" in detail and "tokens" in detail
+
+
+def test_actual_cost_bills_cache_reads_at_a_tenth():
+    """Cache reads are billed separately, at 0.1x the base input rate."""
+    plain = pricing.actual_cost(1_000_000, 1_000_000, "claude-opus-5")
+    cached = pricing.actual_cost(
+        1_000_000, 1_000_000, "claude-opus-5", cache_read_tokens=500_000
+    )
+    assert cached == pytest.approx(plain + 0.5 * 5.0 * 0.1)
+
+
+def test_actual_cost_defaults_to_no_cache_reads():
+    assert pricing.actual_cost(
+        1_000_000, 1_000_000, "claude-opus-5", cache_read_tokens=0
+    ) == pytest.approx(pricing.actual_cost(1_000_000, 1_000_000, "claude-opus-5"))
