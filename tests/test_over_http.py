@@ -100,11 +100,14 @@ def server():
 
 
 @pytest.fixture
-def provider(server):
+def provider(server, monkeypatch):
+    # The loopback server stands in for an operator's own model server, so the
+    # Base URL resolves from the environment — the provenance the URL policy
+    # lets reach a local address. The visitor-typed case is asserted to be
+    # blocked further down.
+    monkeypatch.setenv("SPEC_ENGINE_BASE_URL", server)
     return providers.build(
-        providers.resolve_settings(
-            {"provider": "vllm", "base_url": server, "model": "qwen3:32b"}
-        )
+        providers.resolve_settings({"provider": "vllm", "model": "qwen3:32b"})
     )
 
 
@@ -170,11 +173,12 @@ def test_usage_survives_the_round_trip(provider):
     assert (usage.calls, usage.input_tokens, usage.output_tokens) == (1, 3120, 1840)
 
 
-def test_a_dead_endpoint_is_reported_in_words_a_person_can_act_on():
+def test_a_dead_endpoint_is_reported_in_words_a_person_can_act_on(monkeypatch):
+    monkeypatch.setenv("SPEC_ENGINE_BASE_URL", "http://127.0.0.1:1/v1")
     provider = providers.build(
         providers.resolve_settings(
             # Port 1 is reserved and nothing listens there.
-            {"provider": "vllm", "base_url": "http://127.0.0.1:1/v1", "model": "x"}
+            {"provider": "vllm", "model": "x"}
         )
     )
     with pytest.raises(providers.ProviderError, match="Could not reach"):
