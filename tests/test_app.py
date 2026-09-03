@@ -30,11 +30,22 @@ def boot(monkeypatch, responses=None) -> AppTest:
     replaced, so nothing can be sent anywhere. It exists so the app considers
     itself configured, which is what a real user with a key would see.
     """
-    from core import pipeline
+    from core import pipeline, providers
 
     client = FakeClient(responses or [])
     monkeypatch.setenv("ANTHROPIC_API_KEY", "not-a-real-key")
-    monkeypatch.setattr(pipeline, "build_client", lambda *a, **k: client)
+
+    def fake_build_client(*args, **kwargs):
+        # Mirror the real build_client: the returned provider carries the
+        # session's resolved settings, so the pipeline stamps results with
+        # the model the session actually selected.
+        try:
+            resolved = pipeline.resolve_settings(kwargs.get("overrides"))
+        except providers.ProviderError:
+            return None
+        return providers.adapt(client, settings=resolved)
+
+    monkeypatch.setattr(pipeline, "build_client", fake_build_client)
     app = AppTest.from_file(APP, default_timeout=60)
     app.run()
     assert not app.exception, [str(e.value) for e in app.exception]
@@ -176,6 +187,49 @@ def test_skip_survives_navigating_back(walked):
         line for line in specify_prompt.splitlines() if line.startswith("- DEC-001")
     ][0]
     assert "assumed default, nobody answered" in decision_line
+
+
+def test_duplicate_decision_ids_are_renumbered_before_the_questions_render(
+    monkeypatch, payloads
+):
+    """The model sometimes hands back two DEC-001s. Widget keys are
+    `choice-{id}`, so a duplicate makes question 2's radio silently restore
+    question 1's answer with zero user input. The renumber happens before the
+    first render, so every question gets its own key."""
+    decisions = payloads["interrogate"]["decisions"]
+    decisions[1] = dict(decisions[1], id=decisions[0]["id"])  # the slip
+    app = boot(
+        monkeypatch,
+        [
+            payloads["extract"],
+            {"decisions": decisions},
+            payloads["specify"],
+            payloads["decompose"],
+        ],
+    )
+    click(app, "Read the document")
+    click(app, "Find the open questions")
+
+    # Distinct widget keys: nothing downstream can collide on `choice-{id}`.
+    assert app.radio[0].key == "choice-DEC-001"
+    app.radio[0].set_value("Deal desk approves all discounts").run()
+    click(app, "Next")
+    assert app.radio[0].key == "choice-DEC-002"
+
+    # The user answered only question 1 — question 2 must not self-answer
+    # from question 1's restored widget state.
+    answers = [d.answer for d in app.session_state["decisions"]]
+    assert answers == ["Deal desk approves all discounts", None]
+
+    # The persisted run shows the same.
+    click(app, "Next")
+    click(app, "Compile the specification")
+    saved = store.load()
+    assert [d.id for d in saved.decisions] == ["DEC-001", "DEC-002"]
+    assert [d.answer for d in saved.decisions] == [
+        "Deal desk approves all discounts",
+        None,
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -548,6 +602,130 @@ def test_the_example_never_claims_to_have_read_your_document(monkeypatch):
     rendered = " ".join(m.value for m in app.markdown)
     assert "Verified against your document" not in rendered
     assert "example document" in rendered
+
+
+# --------------------------------------------------------------------------- #
+# The usage line: cache reads and per-model pricing                         #
+# --------------------------------------------------------------------------- #
+
+
+def _cost_line(app):
+    """The rendered cost sentence, or empty when nothing was priced."""
+    for block in app.markdown:
+        if "This run cost" in block.value:
+            return block.value
+    return ""
+
+
+def test_cached_reads_render_and_price_as_their_own_segment(monkeypatch, payloads):
+    """Cache reads show as their own segment and pay the 0.1x cache rate."""
+    from core import pricing
+
+    app = boot(
+        monkeypatch,
+        [
+            payloads["extract"],
+            payloads["interrogate"],
+            payloads["specify"],
+            payloads["decompose"],
+        ],
+    )
+    app._fake.cache_read_per_call = 50_000
+    click(app, "Read the document")
+    click(app, "Find the open questions")
+    click(app, "Skip")
+    click(app, "Skip")
+    click(app, "Compile the specification")
+
+    spend = app.session_state["usage"]
+    assert spend.cache_read_input_tokens == 200_000  # four passes x 50,000
+    rate = pricing.rate_for(app.session_state["result"].model)
+    expected = (
+        spend.input_tokens * rate[0] / 1e6
+        + spend.cache_read_input_tokens * rate[0] * 0.1 / 1e6
+        + spend.output_tokens * rate[1] / 1e6
+    )
+    line = _cost_line(app)
+    assert f"${expected:.2f}" in line
+    # The cached figure is its own segment, never folded into the input count.
+    assert (
+        f"{spend.input_tokens:,} in / {spend.cache_read_input_tokens:,} cached" in line
+    )
+
+
+def test_zero_cache_run_renders_the_original_line(compiled):
+    """No cache reads, no model switch: the sentence keeps its exact shape."""
+    from core import pricing
+
+    spend = compiled.session_state["usage"]
+    rate = pricing.rate_for(compiled.session_state["result"].model)
+    expected = (
+        spend.input_tokens * rate[0] / 1e6 + spend.output_tokens * rate[1] / 1e6
+    )
+    line = _cost_line(compiled)
+    assert "cached" not in line
+    assert (
+        f"This run cost about ${expected:.2f} — {spend.calls} calls, "
+        f"{spend.input_tokens:,} in / {spend.output_tokens:,} out tokens."
+    ) in line
+
+
+def test_two_models_price_each_segment_at_its_own_rate(monkeypatch, payloads):
+    """Extract under one model, switch the model, finish the run: the first
+    segment keeps its own rate instead of being re-priced at the new one."""
+    from core import pricing
+
+    app = boot(
+        monkeypatch,
+        [
+            payloads["extract"],  # first extract, under the default model
+            payloads["extract"],  # re-extract after the model switch
+            payloads["interrogate"],
+            payloads["specify"],
+            payloads["decompose"],
+        ],
+    )
+    click(app, "Read the document")
+    click(app, "Back to document")
+
+    model_widget = [t for t in app.text_input if t.key == "model_widget"][0]
+    model_widget.set_value("claude-sonnet-5").run()
+    assert not app.exception, [str(e.value) for e in app.exception]
+    history = (
+        app.session_state["usage_history"]
+        if "usage_history" in app.session_state
+        else []
+    )
+    assert history and history[0]["model"] == "claude-opus-5", (
+        "the first tally was not frozen when the model changed"
+    )
+    assert history[0]["usage"].calls == 1
+
+    click(app, "Read the document")
+    click(app, "Find the open questions")
+    click(app, "Skip")
+    click(app, "Skip")
+    click(app, "Compile the specification")
+
+    second = app.session_state["usage"]
+    assert second.calls == 4
+    rate_a = pricing.rate_for("claude-opus-5")
+    rate_b = pricing.rate_for("claude-sonnet-5")
+    expected = (
+        history[0]["usage"].input_tokens * rate_a[0] / 1e6
+        + history[0]["usage"].output_tokens * rate_a[1] / 1e6
+        + second.input_tokens * rate_b[0] / 1e6
+        + second.output_tokens * rate_b[1] / 1e6
+    )
+    line = _cost_line(app)
+    assert f"${expected:.2f}" in line
+    # And the session's tokens were not silently re-priced at the new model.
+    wrong = (
+        (history[0]["usage"].input_tokens + second.input_tokens) * rate_b[0] / 1e6
+        + (history[0]["usage"].output_tokens + second.output_tokens) * rate_b[1] / 1e6
+    )
+    assert f"${wrong:.2f}" not in line
+
 
 
 # --------------------------------------------------------------------------- #

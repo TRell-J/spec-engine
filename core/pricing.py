@@ -62,6 +62,10 @@ RATES: Dict[str, Rate] = {
 
 FREE_RATE: Rate = (0.0, 0.0)
 
+# Anthropic bills cache reads on their own line, at 0.1x the base input
+# price (docs.anthropic.com, "Prompt caching").
+CACHE_READ_FACTOR = 0.1
+
 # Roughly four characters per token for English prose.
 CHARS_PER_TOKEN = 4
 
@@ -183,13 +187,29 @@ def estimate_compile(
 
 
 def actual_cost(
-    input_tokens: int, output_tokens: int, model: str, base_url: str = ""
+    input_tokens: int,
+    output_tokens: int,
+    model: str,
+    base_url: str = "",
+    *,
+    cache_read_tokens: int = 0,
 ) -> Optional[float]:
-    """What a finished run really cost, or None if this model has no rate here."""
+    """What a finished run really cost, or None if this model has no rate here.
+
+    `input_tokens` is the uncached remainder only; cache reads are billed on
+    their own line at CACHE_READ_FACTOR the base input price
+    (docs.anthropic.com, "Prompt caching").
+    """
     rate = rate_for(model, base_url)
     if rate is None:
         return None
     input_rate, output_rate = rate
     return round(
-        (input_tokens * input_rate + output_tokens * output_rate) / 1_000_000, 4
+        (
+            input_tokens * input_rate
+            + cache_read_tokens * input_rate * CACHE_READ_FACTOR
+            + output_tokens * output_rate
+        )
+        / 1_000_000,
+        4,
     )

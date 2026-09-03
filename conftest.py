@@ -80,6 +80,9 @@ class FakeClient:
 
         self._responses = list(responses)
         self.calls = []
+        # Tests that need cache-read tokens set this before driving the app;
+        # the default mirrors a provider that reports none.
+        self.cache_read_per_call = 0
         self.messages = SimpleNamespace(create=self._create)
 
     def _create(self, **kwargs):
@@ -96,7 +99,9 @@ class FakeClient:
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text=text)],
             usage=SimpleNamespace(
-                input_tokens=1000, output_tokens=2000, cache_read_input_tokens=0
+                input_tokens=1000,
+                output_tokens=2000,
+                cache_read_input_tokens=self.cache_read_per_call,
             ),
         )
 

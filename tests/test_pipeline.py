@@ -4,6 +4,7 @@ No test here makes a network call or spends a token.
 """
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -426,3 +427,11 @@ def test_repair_finding_counts_its_own_usage(spec, document):
         broken, finding, document=document, usage=usage,
     )
     assert usage.calls == 1
+
+
+def test_spec_id_distinguishes_anagram_titles():
+    assert pipeline._spec_id("Billing Portal") != pipeline._spec_id("Portal Billing")
+
+
+def test_spec_id_keeps_the_public_format():
+    assert re.fullmatch(r"SPEC-\d{4}-\d{3}", pipeline._spec_id("Billing Portal"))

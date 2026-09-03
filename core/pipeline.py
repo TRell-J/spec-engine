@@ -19,6 +19,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
+from hashlib import sha1
 from typing import Any, Dict, List, Optional, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -590,7 +591,9 @@ class CompileResult:
 
 
 def _spec_id(name: str) -> str:
-    digest = sum(ord(char) for char in name) % 900 + 100
+    # sha1 is order-dependent, so anagram titles ("Billing Portal" vs "Portal
+    # Billing") no longer land in the same bucket the way character sums do.
+    digest = int(sha1(name.encode("utf-8")).hexdigest(), 16) % 900 + 100
     return f"SPEC-{date.today().year}-{digest:03d}"
 
 
