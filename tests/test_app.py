@@ -11,6 +11,7 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from conftest import FakeClient
+from core import store
 
 APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
 
@@ -175,6 +176,49 @@ def test_skip_survives_navigating_back(walked):
         line for line in specify_prompt.splitlines() if line.startswith("- DEC-001")
     ][0]
     assert "assumed default, nobody answered" in decision_line
+
+
+def test_duplicate_decision_ids_are_renumbered_before_the_questions_render(
+    monkeypatch, payloads
+):
+    """The model sometimes hands back two DEC-001s. Widget keys are
+    `choice-{id}`, so a duplicate makes question 2's radio silently restore
+    question 1's answer with zero user input. The renumber happens before the
+    first render, so every question gets its own key."""
+    decisions = payloads["interrogate"]["decisions"]
+    decisions[1] = dict(decisions[1], id=decisions[0]["id"])  # the slip
+    app = boot(
+        monkeypatch,
+        [
+            payloads["extract"],
+            {"decisions": decisions},
+            payloads["specify"],
+            payloads["decompose"],
+        ],
+    )
+    click(app, "Read the document")
+    click(app, "Find the open questions")
+
+    # Distinct widget keys: nothing downstream can collide on `choice-{id}`.
+    assert app.radio[0].key == "choice-DEC-001"
+    app.radio[0].set_value("Deal desk approves all discounts").run()
+    click(app, "Next")
+    assert app.radio[0].key == "choice-DEC-002"
+
+    # The user answered only question 1 — question 2 must not self-answer
+    # from question 1's restored widget state.
+    answers = [d.answer for d in app.session_state["decisions"]]
+    assert answers == ["Deal desk approves all discounts", None]
+
+    # The persisted run shows the same.
+    click(app, "Next")
+    click(app, "Compile the specification")
+    saved = store.load()
+    assert [d.id for d in saved.decisions] == ["DEC-001", "DEC-002"]
+    assert [d.answer for d in saved.decisions] == [
+        "Deal desk approves all discounts",
+        None,
+    ]
 
 
 # --------------------------------------------------------------------------- #
