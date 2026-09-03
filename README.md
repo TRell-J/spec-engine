@@ -98,11 +98,11 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Pick a model in the **Model** panel on the first screen, or set it once in a `.env` (`cp .env.example .env`). Each provider reads its own conventional key — `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` — and `SPEC_ENGINE_PROVIDER` / `SPEC_ENGINE_MODEL` override the defaults. A model on localhost needs no key. **Check connection** verifies the endpoint, the model, and whether that model can hold a JSON schema before you spend anything.
+Pick a model in the **Model** panel on the first screen, or set it once in a `.env` (`cp .env.example .env`). An interactive session resolves keys from the environment only when you ask it to — set `SPEC_ENGINE_ALLOW_SERVER_KEY=1` to use the conventional provider keys (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`), or paste a key into the panel; it stays in the session and is never written to disk. `SPEC_ENGINE_PROVIDER` / `SPEC_ENGINE_MODEL` override the defaults. A model on localhost needs no key. **Check connection** verifies the endpoint, the model, and whether that model can hold a JSON schema before you spend anything.
 
 A compile is four model calls — low tens of cents on a frontier model, free on your own hardware. The app estimates before you spend and measures after; where it has no published rate for a model it shows token counts and says so rather than guessing.
 
-`pytest -q` runs 409 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
+`pytest -q` runs 454 tests, fully offline. An autouse fixture clears credentials and the pipeline runs against a scripted fake client, so the suite never reaches a vendor or spends a token. One exception is worth naming: `tests/test_over_http.py` starts an OpenAI-compatible server on a loopback port and compiles a whole spec through it, because the one bug that got past the unit tests was in none of the units.
 
 ### Hosting it
 
@@ -113,6 +113,14 @@ SPEC_ENGINE_STORE=off                     # the default — nothing read or writ
 SPEC_ENGINE_STORE=on                      # opt in at ./.spec_engine
 SPEC_ENGINE_STORE=/var/lib/spec-engine    # opt in at an explicit path
 ```
+
+The app also refuses to spend your money by default. An interactive session resolves no API key from the server's environment: a visitor runs on a key they typed — billed to them — or on the walkthroughs and static guidance, with no client built and no network at all. To let a deployment use the host's own key anyway — a private deployment, or a demo you are paying for on purpose — set the flag, and the app says so on every screen:
+
+```bash
+SPEC_ENGINE_ALLOW_SERVER_KEY=1            # values: 1 | true | yes | on
+```
+
+A server key never pairs with a Base URL a visitor typed: the app refuses the combination outright, since wherever that URL points decides where your key travels. Server keys work with the provider's preset URL, or one set in the environment.
 
 ---
 

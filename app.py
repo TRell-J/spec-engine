@@ -57,6 +57,14 @@ def _adopt_secrets() -> None:
 
 _adopt_secrets()
 
+# Server keys — the operator's environment and secrets — are opt-in for the
+# interactive app. A public deployment must not spend the host's money on an
+# anonymous visitor's compiles; a local .env workflow is restored by setting
+# this. Documented in the README ("Hosting it").
+_SERVER_KEYS_OK = os.getenv("SPEC_ENGINE_ALLOW_SERVER_KEY", "").lower() in {
+    "1", "true", "yes", "on"
+}
+
 st.set_page_config(
     page_title="Spec-Engine",
     page_icon="◆",
@@ -134,8 +142,25 @@ def provider_overrides() -> dict:
     }
 
 
+def _session_settings() -> tuple[Settings, Optional[str]]:
+    """Resolve this session's settings, or the refusal that replaced them.
+
+    A server key paired with a visitor-typed Base URL is refused outright —
+    wherever the URL points decides where the operator's credentials would
+    travel. The refusal is a configuration error to show, not a crash:
+    resolution falls back to the fail-closed view (server keys off, nothing
+    configured) and carries the message alongside.
+    """
+    overrides = provider_overrides()
+    try:
+        return resolve_settings(overrides, allow_env_keys=_SERVER_KEYS_OK), None
+    except ProviderError as exc:
+        return resolve_settings(overrides, allow_env_keys=False), str(exc)
+
+
 def settings() -> Settings:
-    return resolve_settings(provider_overrides())
+    current, _ = _session_settings()
+    return current
 
 
 def provider_changed() -> None:
@@ -161,9 +186,15 @@ def provider_changed() -> None:
 
 def check_connection() -> None:
     """Ask the endpoint whether it is there, before a compile finds out."""
-    provider = build_client(overrides=provider_overrides())
+    current, refusal = _session_settings()
+    if refusal:
+        st.session_state["connection"] = ("error", refusal)
+        return
+    provider = build_client(
+        overrides=provider_overrides(), allow_env_keys=_SERVER_KEYS_OK
+    )
     if provider is None:
-        st.session_state["connection"] = ("error", _unconfigured_reason(settings()))
+        st.session_state["connection"] = ("error", _unconfigured_reason(current))
         return
     try:
         st.session_state["connection"] = ("ok", provider.check())
@@ -173,9 +204,7 @@ def check_connection() -> None:
 
 
 def _unconfigured_reason(current: Settings) -> str:
-    if not current.model.strip():
-        return "Name a model before compiling."
-    return f"Add an API key for {current.label} before compiling."
+    return providers.unconfigured_reason(current)
 
 
 def document_text() -> str:
@@ -418,9 +447,15 @@ def run_pending() -> None:
     if not action:
         return
 
-    client = build_client(overrides=provider_overrides())
+    current, refusal = _session_settings()
+    if refusal:
+        st.session_state["error"] = refusal
+        return
+    client = build_client(
+        overrides=provider_overrides(), allow_env_keys=_SERVER_KEYS_OK
+    )
     if client is None:
-        st.session_state["error"] = _unconfigured_reason(settings())
+        st.session_state["error"] = _unconfigured_reason(current)
         return
     st.session_state.pop("error", None)
     document = document_text()
@@ -564,15 +599,16 @@ def screen_document() -> None:
 
 
 def _provider_panel(current: Settings) -> None:
-    """Which model reads the document — one collapsed panel, not a screen.
+    """Which model reads the document — one panel, not a screen.
 
-    Closed it states the current choice; open it is the whole configuration.
-    Nobody choosing the default should have to look at any of it.
+    Open even when the app is configured: the panel carries the key state,
+    and a visitor must be able to see whether they are riding on the
+    server's key. It never auto-collapses.
     """
     spec = providers.spec_for(current.provider)
     st.markdown(theme.rule(), **HTML)
 
-    with st.expander(f"Model · {current.describe}", expanded=not current.configured):
+    with st.expander(f"Model · {current.describe}", expanded=True):
         st.selectbox(
             "Provider",
             [option.label for option in providers.PROVIDERS],
@@ -1321,7 +1357,7 @@ def main() -> None:
     init_state()
     run_pending()
 
-    current = settings()
+    current, refusal = _session_settings()
     st.markdown(
         theme.strip(
             connected=current.configured,
@@ -1330,8 +1366,19 @@ def main() -> None:
         **HTML,
     )
 
+    if current.key_provenance == "server":
+        # The operator opted in; every visitor is told what they ride on.
+        st.markdown(
+            theme.notice(
+                "Running on the server's API key; requests are billed to the operator."
+            ),
+            **HTML,
+        )
+
     if error := st.session_state.get("error"):
         st.error(error)
+    if refusal:
+        st.error(refusal)
 
     _saved_run_offer()
 
