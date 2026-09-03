@@ -6,6 +6,7 @@ error message is asserted against a recorded call rather than a live server.
 """
 
 import json
+import socket
 
 import pytest
 
@@ -550,3 +551,131 @@ def test_the_repair_turn_travels_over_the_openai_protocol_too(payloads):
     conversation = transport.calls[1]["body"]["messages"]
     assert conversation[-1]["role"] == "user"
     assert "failed validation" in conversation[-1]["content"]
+
+
+# --------------------------------------------------------------------------- #
+# Provenance tagging
+# --------------------------------------------------------------------------- #
+
+
+def test_a_typed_base_url_is_tagged_ui():
+    settings = providers.resolve_settings(
+        {
+            "provider": "openai",
+            "api_key": "sk-test",
+            "base_url": "https://api.example.com/v1",
+        }
+    )
+    assert settings.base_url_source == "ui"
+
+
+def test_an_environment_base_url_is_tagged_env(monkeypatch):
+    monkeypatch.setenv("SPEC_ENGINE_BASE_URL", "https://api.example.com/v1")
+    settings = providers.resolve_settings({"provider": "openai", "api_key": "sk-test"})
+    assert settings.base_url_source == "env"
+
+
+def test_the_preset_base_url_is_tagged_preset():
+    settings = providers.resolve_settings({"provider": "openai"})
+    assert settings.base_url_source == "preset"
+    assert settings.base_url == "https://api.openai.com/v1"
+
+
+# --------------------------------------------------------------------------- #
+# The URL policy at the seam
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("source", ["ui", "env", "preset"])
+def test_non_web_schemes_are_refused_for_every_provenance(source):
+    """file:// read the host's files through this seam once. Not any more."""
+    with pytest.raises(ProviderError, match="plain http"):
+        providers._validate_url("file:///etc/hostname", source)
+    with pytest.raises(ProviderError, match="plain http"):
+        providers._validate_url("ftp://mirror.example.net/model.gguf", source)
+
+
+def test_the_scheme_gate_is_case_insensitive():
+    providers._validate_url("HTTPS://api.example.com/v1", "preset")
+
+
+def test_embedded_userinfo_is_refused():
+    with pytest.raises(ProviderError, match="plain http"):
+        providers._validate_url("https://user:pass@api.example.com/v1", "env")
+    with pytest.raises(ProviderError, match="plain http"):
+        providers._validate_url("https://attacker@api.example.com/v1", "preset")
+
+
+def test_a_url_without_a_host_is_refused():
+    with pytest.raises(ProviderError, match="missing a host"):
+        providers._validate_url("http:///v1", "preset")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:1234/v1",
+        "http://169.254.169.254/latest/meta-data",
+        "http://10.0.0.5/v1",
+        "http://192.168.1.10:8000/v1",
+        "http://172.16.0.1/v1",
+    ],
+)
+def test_visitor_urls_may_not_reach_private_addresses(url):
+    with pytest.raises(ProviderError, match="not reachable from a hosted app"):
+        providers._validate_url(url, "ui")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1:11434/v1",
+        "http://localhost:1234/v1",
+        "http://10.0.0.5/v1",
+    ],
+)
+def test_operator_provenance_keeps_its_local_servers(url):
+    """The shipped presets are loopback on purpose; so is the operator's env."""
+    providers._validate_url(url, "preset")
+    providers._validate_url(url, "env")
+
+
+def test_a_public_host_passes_the_visitor_gate(monkeypatch):
+    """No real DNS in the suite — the resolution itself is stubbed."""
+    monkeypatch.setattr(
+        "socket.getaddrinfo",
+        lambda *args, **kwargs: [(2, 1, 6, "", ("93.184.216.34", 0))],
+    )
+    providers._validate_url("https://api.example.com/v1", "ui")
+
+
+def test_an_unresolvable_host_is_a_clear_error_not_a_stack_trace(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise socket.gaierror("name resolution failed")
+
+    monkeypatch.setattr("socket.getaddrinfo", refuse)
+    with pytest.raises(ProviderError, match="Could not resolve"):
+        providers._validate_url("https://api.example.com/v1", "ui")
+
+
+# --------------------------------------------------------------------------- #
+# The request timeout
+# --------------------------------------------------------------------------- #
+
+
+def test_the_timeout_defaults_to_five_minutes(monkeypatch):
+    monkeypatch.delenv("SPEC_ENGINE_TIMEOUT_SECONDS", raising=False)
+    assert providers._request_timeout() == 300.0
+
+
+def test_the_timeout_can_be_raised_for_slow_local_hardware(monkeypatch):
+    monkeypatch.setenv("SPEC_ENGINE_TIMEOUT_SECONDS", "900.5")
+    assert providers._request_timeout() == 900.5
+
+
+@pytest.mark.parametrize("raw", ["banana", "", "   ", "-5", "0"])
+def test_an_unreadable_timeout_falls_back_to_the_default(monkeypatch, raw):
+    monkeypatch.setenv("SPEC_ENGINE_TIMEOUT_SECONDS", raw)
+    assert providers._request_timeout() == 300.0
+

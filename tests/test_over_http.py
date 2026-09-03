@@ -10,8 +10,10 @@ The server is deliberately awkward in the ways an open-weight model is
 awkward: it thinks out loud before answering and fences its JSON.
 """
 
+import dataclasses
 import json
 import threading
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -49,6 +51,9 @@ class _Handler(BaseHTTPRequestHandler):
 
     payloads = _payloads()
     seen: list = []
+    #: Every request that reached the server, GET and POST alike — the URL
+    #: policy assertions watch this log, not just the exception type.
+    requests: list = []
 
     def log_message(self, *args):
         pass  # keep the test output clean
@@ -62,9 +67,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(raw)
 
     def do_GET(self):
+        type(self).requests.append(("GET", self.path))
         self._reply({"data": [{"id": "qwen3:32b"}]})
 
     def do_POST(self):
+        type(self).requests.append(("POST", self.path))
         body = json.loads(self.rfile.read(int(self.headers["content-length"])))
         type(self).seen.append(body)
         request = json.dumps(body)
@@ -91,6 +98,7 @@ class _Handler(BaseHTTPRequestHandler):
 @pytest.fixture
 def server():
     _Handler.seen = []
+    _Handler.requests = []
     httpd = HTTPServer(("127.0.0.1", 0), _Handler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -171,6 +179,142 @@ def test_usage_survives_the_round_trip(provider):
     usage = pipeline.Usage()
     pipeline.extract_claims(provider, REFERENCE_DOCUMENT, usage=usage)
     assert (usage.calls, usage.input_tokens, usage.output_tokens) == (1, 3120, 1840)
+
+
+# --------------------------------------------------------------------------- #
+# The URL policy, against a real server
+# --------------------------------------------------------------------------- #
+
+
+class _Redirector(BaseHTTPRequestHandler):
+    """Answers every GET with a 302 to a fixed target, recording what arrived."""
+
+    target = ""
+    seen_authorization: list = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        type(self).seen_authorization.append(self.headers.get("Authorization"))
+        self.send_response(302)
+        self.send_header("Location", self.target)
+        self.send_header("content-length", "0")
+        self.end_headers()
+
+
+class _Destination(BaseHTTPRequestHandler):
+    """The redirect target. What it received is the assertion."""
+
+    seen_authorization: list = []
+
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        type(self).seen_authorization.append(self.headers.get("Authorization"))
+        raw = json.dumps({"data": []}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+
+def _serve(handler_class):
+    httpd = HTTPServer(("127.0.0.1", 0), handler_class)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, thread
+
+
+def test_a_visitor_typed_loopback_base_url_never_reaches_the_server(server):
+    """The request dies at the seam — the server's own log is the witness."""
+    settings = providers.resolve_settings(
+        {
+            "provider": "vllm",
+            "base_url": server,
+            "model": "qwen3:32b",
+            "api_key": "sk-visitor",
+        }
+    )
+    assert settings.base_url_source == "ui"
+    provider = providers.build(settings)
+
+    with pytest.raises(
+        providers.ProviderError, match="not reachable from a hosted app"
+    ):
+        provider.check()
+
+    assert _Handler.requests == [], "a blocked target is contacted zero times"
+
+
+def test_a_preset_provenance_loopback_url_still_reaches_the_server(server):
+    """The shipped presets point at loopback on purpose; the egress check is
+    for visitor-typed URLs only."""
+    settings = dataclasses.replace(
+        providers.resolve_settings(
+            {"provider": "vllm", "base_url": server, "model": "qwen3:32b"}
+        ),
+        base_url_source="preset",
+    )
+
+    assert "1 models available" in providers.build(settings).check()
+    assert len(_Handler.requests) == 1
+
+
+def test_a_redirect_to_a_private_target_is_never_followed():
+    """Every hop re-runs the policy against the provenance the chain started
+    with — a public first hop cannot launder a private redirect target past
+    it. Handler-level because a visitor-provenance request can, by design,
+    never reach a local first-hop server to be redirected from."""
+    request = urllib.request.Request("http://api.provider.example/v1/models")
+    request.provenance = "ui"
+    with pytest.raises(
+        providers.ProviderError, match="not reachable from a hosted app"
+    ):
+        providers._ValidatingRedirects().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            "http://169.254.169.254/latest/meta-data/",
+        )
+
+
+def test_a_cross_host_redirect_drops_the_authorization_header():
+    """Same machine, different host: 127.0.0.1 → localhost is the cross-host
+    boundary the Authorization rule keys on."""
+    _Redirector.seen_authorization = []
+    _Destination.seen_authorization = []
+    first, first_thread = _serve(_Redirector)
+    second, second_thread = _serve(_Destination)
+    _Redirector.target = f"http://localhost:{second.server_port}/v1/models"
+    try:
+        settings = dataclasses.replace(
+            providers.resolve_settings(
+                {
+                    "provider": "vllm",
+                    "base_url": f"http://127.0.0.1:{first.server_port}/v1",
+                    "model": "qwen3:32b",
+                    "api_key": "sk-visitor-secret",
+                }
+            ),
+            base_url_source="preset",
+        )
+        message = providers.build(settings).check()
+    finally:
+        first.shutdown()
+        second.shutdown()
+        first_thread.join(timeout=5)
+        second_thread.join(timeout=5)
+
+    assert "Reached" in message
+    assert _Redirector.seen_authorization == ["Bearer sk-visitor-secret"]
+    assert _Destination.seen_authorization == [None], (
+        "the key must not ride along to the second host"
+    )
 
 
 def test_a_dead_endpoint_is_reported_in_words_a_person_can_act_on(monkeypatch):
