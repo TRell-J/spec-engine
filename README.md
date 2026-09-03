@@ -1,6 +1,6 @@
 # Spec-Engine — Specification Verification
 
-An applied-AI prototype that turns an unstructured product document (a PRD, discovery notes, workshop scribbles) into requirements an autonomous coding agent can execute — where every requirement traces back to a quoted sentence in the source, and the build fails if one doesn't. Runs with no API key at all (three hand-authored walkthroughs), or bring a key for any Anthropic or OpenAI-compatible model, hosted or local.
+An applied-AI prototype that turns an unstructured product document (a PRD, discovery notes, workshop scribbles) into requirements an autonomous coding agent can execute — where every requirement traces back to a quoted sentence in the source, and the build fails if one doesn't. Live demo: https://spec-engine.streamlit.app · Runs with no API key (three hand-authored walkthroughs, held to the same verification gate), or bring your own key for any Anthropic or OpenAI-compatible model, hosted or local.
 
 The premise in one line: **an agent will build whatever your document implies, so something has to check that the document actually said it.**
 
@@ -88,6 +88,8 @@ With no model configured the compiler doesn't run. It will not generate a spec f
 ---
 
 ## Running it
+
+The [live demo](https://spec-engine.streamlit.app) needs no installation and no key — the three walkthroughs run with zero API calls. To run it yourself:
 
 ```bash
 git clone https://github.com/TRell-J/spec-engine.git && cd spec-engine
