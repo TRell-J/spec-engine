@@ -8,4 +8,4 @@ python-dotenv>=1.0.0
 # so an open-weight model on your own machine needs no vendor SDK at all.
 # 1.x is required: the Anthropic pass pins its output to a JSON Schema via
 # `output_config`, which the 0.x SDK does not support.
-anthropic>=1.0.0
+anthropic>=1.2.0
