@@ -401,6 +401,13 @@ def run_pending() -> None:
                 found = interrogate(
                     client, document, st.session_state["claims"], usage=spend
                 )
+            # The model sometimes reuses an id across decisions (two DEC-001s).
+            # Renumber before the first render or persist: widget keys are
+            # `choice-{id}`, so a duplicate makes the next question's radio
+            # silently restore the previous one's widget state. Answers are all
+            # None straight out of interrogate(), so nothing is orphaned.
+            for n, decision in enumerate(found.decisions, start=1):
+                decision.id = f"DEC-{n:03d}"
             st.session_state.update(
                 decisions=found.decisions, step=2, question=0
             )
