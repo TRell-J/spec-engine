@@ -954,16 +954,27 @@ def screen_spec(result: CompileResult) -> None:
         # switching provider afterwards must not re-price finished work.
         where = result.base_url or settings().base_url
         spent = pricing.actual_cost(
-            spend.input_tokens, spend.output_tokens, result.model, base_url=where
+            spend.input_tokens,
+            spend.output_tokens,
+            result.model,
+            base_url=where,
+            cache_read_tokens=spend.cache_read_input_tokens,
         )
         rounds = (
             f" {result.repair_rounds} repair round(s)."
             if result.repair_rounds
             else ""
         )
+        # Cache reads are their own line on the bill; never fold them into
+        # the in figure, which is the uncached remainder only.
+        cached = (
+            f" {spend.cache_read_input_tokens:,} cached /"
+            if spend.cache_read_input_tokens
+            else ""
+        )
         tokens = (
-            f"{spend.calls} calls, {spend.input_tokens:,} in / "
-            f"{spend.output_tokens:,} out tokens."
+            f"{spend.calls} calls, {spend.input_tokens:,} in /"
+            f"{cached} {spend.output_tokens:,} out tokens."
         )
         # Three honest answers, and never a fabricated fourth: a price, "this
         # cost you nothing because it ran on your own hardware", or the token
