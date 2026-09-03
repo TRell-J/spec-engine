@@ -93,6 +93,7 @@ def init_state() -> None:
         "editing_claims": False,
         "example_key": registry.DEFAULT_KEY,
         "usage": Usage(),
+        "usage_history": [],
     }
     # Provider configuration, seeded from the environment on first load.
     started = resolve_settings()
@@ -152,8 +153,10 @@ def provider_changed() -> None:
     """Switching provider reloads that preset's defaults and drops the key.
 
     Carrying a key across providers would send an Anthropic secret to whoever
-    owns the next base URL.
+    owns the next base URL. Tokens already spent stay frozen at the model
+    that earned them — filed away, never re-priced here.
     """
+    _freeze_usage_segment()
     label = st.session_state.get("provider_widget", "")
     spec = providers.spec_for(label)
     st.session_state.update(
@@ -167,6 +170,68 @@ def provider_changed() -> None:
     )
     st.session_state.pop("connection", None)
     st.session_state.pop("error", None)
+
+
+def _freeze_usage_segment() -> None:
+    """File the outgoing tally under the model that earned it.
+
+    A session can finish passes under several models. Each switch freezes
+    what the previous one spent — its model, base_url, and the Usage object
+    — so the spec screen can price every segment at its own rate instead of
+    re-pricing finished work at whatever is selected now.
+    """
+    spend: Usage = st.session_state.get("usage") or Usage()
+    if not spend.calls:
+        return
+    st.session_state.setdefault("usage_history", []).append(
+        {
+            "model": st.session_state.get("model_name", ""),
+            "base_url": st.session_state.get("base_url", ""),
+            "usage": spend,
+        }
+    )
+    st.session_state["usage"] = Usage()
+
+
+def _merged_usage(history: List[dict], spend: Usage) -> Usage:
+    """The session's whole tally: every frozen segment plus the live one."""
+    totals = Usage()
+    for segment in history:
+        totals.merge(segment["usage"])
+    totals.merge(spend)
+    return totals
+
+
+def _session_cost(
+    history: List[dict], spend: Usage, model: str, base_url: str
+) -> Optional[float]:
+    """Sum every segment's cost, each priced at its own model and rate.
+
+    None when any segment has no published rate — a partial price would be
+    the confident fabrication the pricing rules refuse to make.
+    """
+    costs = [
+        pricing.actual_cost(
+            segment["usage"].input_tokens,
+            segment["usage"].output_tokens,
+            segment["model"],
+            base_url=segment["base_url"],
+            cache_read_tokens=segment["usage"].cache_read_input_tokens,
+        )
+        for segment in history
+    ]
+    costs.append(
+        pricing.actual_cost(
+            spend.input_tokens,
+            spend.output_tokens,
+            model,
+            base_url=base_url,
+            cache_read_tokens=spend.cache_read_input_tokens,
+        )
+    )
+    if any(cost is None for cost in costs):
+        return None
+    return round(sum(costs), 4)
 
 
 def check_connection() -> None:
@@ -210,7 +275,11 @@ def _persist() -> None:
     if st.session_state.get("example"):
         return  # an example is not the user's work
     result = st.session_state.get("result")
-    usage = st.session_state.get("usage")
+    # Every segment counts, even after a provider switch froze earlier ones.
+    usage = _merged_usage(
+        st.session_state.get("usage_history") or [],
+        st.session_state.get("usage") or Usage(),
+    )
     try:
         store.save(
             store.SavedRun(
@@ -311,6 +380,7 @@ def _clear_run(restore_draft: bool = True) -> None:
         example=False,
         saved_document=None,
         usage=Usage(),
+        usage_history=[],
     )
     st.session_state.pop("error", None)
 
@@ -949,17 +1019,15 @@ def screen_spec(result: CompileResult) -> None:
         _view_files(spec, report)
 
     spend: Usage = st.session_state["usage"]
-    if spend.calls and not st.session_state.get("example"):
-        # The endpoint the run actually used, not whatever is selected now:
-        # switching provider afterwards must not re-price finished work.
+    history: List[dict] = st.session_state.get("usage_history") or []
+    if (spend.calls or history) and not st.session_state.get("example"):
+        # Each tally is priced where it ran, not at whatever is selected
+        # now: switching provider afterwards must not re-price finished
+        # work. Frozen segments keep the model that earned them; the live
+        # tally ran on the model that produced this result.
         where = result.base_url or settings().base_url
-        spent = pricing.actual_cost(
-            spend.input_tokens,
-            spend.output_tokens,
-            result.model,
-            base_url=where,
-            cache_read_tokens=spend.cache_read_input_tokens,
-        )
+        totals = _merged_usage(history, spend)
+        spent = _session_cost(history, spend, result.model, where)
         rounds = (
             f" {result.repair_rounds} repair round(s)."
             if result.repair_rounds
@@ -968,18 +1036,18 @@ def screen_spec(result: CompileResult) -> None:
         # Cache reads are their own line on the bill; never fold them into
         # the in figure, which is the uncached remainder only.
         cached = (
-            f" {spend.cache_read_input_tokens:,} cached /"
-            if spend.cache_read_input_tokens
+            f" {totals.cache_read_input_tokens:,} cached /"
+            if totals.cache_read_input_tokens
             else ""
         )
         tokens = (
-            f"{spend.calls} calls, {spend.input_tokens:,} in /"
-            f"{cached} {spend.output_tokens:,} out tokens."
+            f"{totals.calls} calls, {totals.input_tokens:,} in /"
+            f"{cached} {totals.output_tokens:,} out tokens."
         )
         # Three honest answers, and never a fabricated fourth: a price, "this
         # cost you nothing because it ran on your own hardware", or the token
         # counts alone when nothing here can price the model.
-        if providers.is_local(where):
+        if providers.is_local(where) and not history:
             line = f"This run was free — it ran on your own hardware. {tokens}"
         elif spent is not None:
             line = f"This run cost about ${spent:.2f} — {tokens}"
