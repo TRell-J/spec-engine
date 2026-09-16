@@ -1,0 +1,6 @@
+# Repo policy for obvious agents — TRell-J/spec-engine.
+# Auto-detected from GitHub repo settings on 2026-09-03.
+
+defaultBranch: main
+mergeMethod: squash        # repo allows merge-commit, squash and rebase; squash keeps one commit per PR
+requireHumanMerge: true    # a human approves before any default-branch PR merges
